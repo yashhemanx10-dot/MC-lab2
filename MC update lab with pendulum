@@ -1,0 +1,102 @@
+#include <stdint.h>
+#include "inc/tm4c1294ncpdt.h"
+
+void gpio_init(void)
+{
+    SYSCTL_RCGCGPIO_R |= (1<<3) | (1<<10) | (1<<11);          // clocks: D, L, M
+    while (!(SYSCTL_PRGPIO_R & ((1<<3)|(1<<10)|(1<<11))));    // wait until ready
+
+    GPIO_PORTD_AHB_DIR_R |=  (1<<0);                          // PD0 = trigger (out)
+    GPIO_PORTD_AHB_DIR_R &= ~(1<<1);                          // PD1 = echo (in)
+    GPIO_PORTD_AHB_DEN_R |= (1<<0) | (1<<1);
+    GPIO_PORTD_AHB_DATA_R |= (1<<0);                          // trigger idle = high
+
+    GPIO_PORTL_DIR_R &= ~(1<<0);                              // PL0 = pendulum signal (in)
+    GPIO_PORTL_DEN_R |=  (1<<0);
+
+    GPIO_PORTM_DIR_R = 0xFF;                                  // PM7..0 = LEDs (out)
+    GPIO_PORTM_DEN_R = 0xFF;
+    GPIO_PORTM_DATA_R = 0x00;                                 // LEDs off
+}
+
+void timer_init(void)                                         // Timer1 = sleep
+{
+    SYSCTL_RCGCTIMER_R |= (1<<1);
+    while (!(SYSCTL_PRTIMER_R & (1<<1)));
+    TIMER1_CTL_R &= ~0x01;
+    TIMER1_CFG_R  = 0x00;
+    TIMER1_TAMR_R = 0x01;                                     // one-shot, down
+}
+
+void sleep(int ms)
+{
+    TIMER1_TAILR_R = ms * 16000 - 1;
+    TIMER1_ICR_R   = 0x01;
+    TIMER1_CTL_R  |= 0x01;
+    while (!(TIMER1_RIS_R & 0x01));
+}
+
+void stopwatch_init(void)                                     // Timer2 = stopwatch
+{
+    SYSCTL_RCGCTIMER_R |= (1<<2);
+    while (!(SYSCTL_PRTIMER_R & (1<<2)));
+    TIMER2_CTL_R  &= ~0x01;
+    TIMER2_CFG_R   = 0x00;
+    TIMER2_TAMR_R  = 0x12;                                    // periodic, up
+    TIMER2_TAILR_R = 0xFFFFFFFF;
+    TIMER2_CTL_R  |= 0x01;
+}
+
+uint32_t measure_echo(void)                                   // returns echo time in ticks
+{
+    uint32_t t_start, t_end;
+
+    GPIO_PORTD_AHB_DATA_R &= ~(1<<0);                         // falling edge = start
+    while (!(GPIO_PORTD_AHB_DATA_R & (1<<1)));                // wait echo high
+    t_start = TIMER2_TAV_R;
+    while (GPIO_PORTD_AHB_DATA_R & (1<<1));                   // wait echo low
+    t_end = TIMER2_TAV_R;
+    GPIO_PORTD_AHB_DATA_R |= (1<<0);                          // trigger back high
+
+    return t_end - t_start;
+}
+
+void wait_left_point(void)                                    // rising edge PL0
+{
+    while (GPIO_PORTL_DATA_R & (1<<0));
+    while (!(GPIO_PORTL_DATA_R & (1<<0)));
+}
+
+void wait_right_point(void)                                   // falling edge PL0
+{
+    while (!(GPIO_PORTL_DATA_R & (1<<0)));
+    while (GPIO_PORTL_DATA_R & (1<<0));
+}
+
+int main(void)
+{
+    uint32_t ticks, mm;
+    int on_ms;
+
+    gpio_init();
+    timer_init();
+    stopwatch_init();
+
+    while (1)
+    {
+        wait_left_point();                       // swing 1: measure
+        ticks = measure_echo();
+        mm = (ticks / 16) * 330 / 2000;
+
+        wait_right_point();                      // swing 2: bar
+        on_ms = mm / 20;
+        if (on_ms < 1)  on_ms = 1;
+        if (on_ms > 40) on_ms = 40;
+
+        GPIO_PORTM_DATA_R = 0xFF;
+        sleep(on_ms);
+        GPIO_PORTM_DATA_R = 0x00;
+
+        printf("Distance: %3d.%d cm\n", (int)(mm / 10), (int)(mm % 10));
+    }
+}
